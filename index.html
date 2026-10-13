@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#b9e6ff">
+  <title>Mini Games</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <!-- Decorative sky. Hidden from screen readers so it is not announced as content. -->
+  <div class="backdrop" aria-hidden="true">
+    <div class="sun"></div>
+    <div class="cloud cloud-a"></div>
+    <div class="cloud cloud-b"></div>
+    <div class="cloud cloud-c"></div>
+    <div class="bubble bubble-a"></div>
+    <div class="bubble bubble-b"></div>
+    <div class="bubble bubble-c"></div>
+    <div class="hill hill-back"></div>
+    <div class="hill hill-front"></div>
+  </div>
+
+  <main id="app" class="app">
+    <noscript>
+      <p class="coming-soon">Please turn on JavaScript to play.</p>
+    </noscript>
+  </main>
+
+  <!--
+    Script order matters. Each file adds one piece:
+    config (rules) -> progress (saving) -> round screens -> menu -> app (startup).
+  -->
+  <script src="js/config.js"></script>
+  <script src="js/progress.js"></script>
+  <script src="js/rounds/placeholder.js"></script>
+  <script src="js/rounds/round1.js"></script>
+  <script src="js/rounds/round2.js"></script>
+  <script src="js/rounds/round3.js"></script>
+  <script src="js/rounds/round4.js"></script>
+  <script src="js/rounds/round5.js"></script>
+  <script src="js/rounds/round6.js"></script>
+  <script src="js/menu.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
