@@ -32,8 +32,11 @@ public final class Config {
     /** TEMPORARY TEST VALUE, OWNER TO TUNE. Fall speed never goes above this. */
     public static final double MAX_FALL_SPEED = 700;
 
-    /** TEMPORARY TEST VALUE, OWNER TO TUNE. Seconds between balls. The first ball appears as soon as the run starts. */
+    /** TEMPORARY TEST VALUE, OWNER TO TUNE. Seconds between balls after the first one. */
     public static final double BALL_SPAWN_INTERVAL = 0.8;
+
+    /** TEMPORARY TEST VALUE, OWNER TO TUNE. Seconds after Start before the first ball appears. */
+    public static final double FIRST_BALL_DELAY_SECONDS = 3;
 
     /** Pixels. */
     public static final double PLATFORM_WIDTH = 150;
@@ -166,31 +169,33 @@ public final class Config {
     public static final int ROUND2_HITS_TO_CLEAR = 4;
     public static final int ROUND2_HITS_FOR_STAR = 5;
 
-    /** TEMPORARY TEST VALUE, OWNER TO CONFIRM. Flip to true and the red spot shrinks each stage. */
-    public static final boolean ROUND2_TARGET_SHRINKS = false;
+    /** The red zone shrinks each stage. The owner decided this. */
+    public static final boolean ROUND2_TARGET_SHRINKS = true;
 
     /**
-     * TEMPORARY TEST VALUE, OWNER TO CONFIRM.
-     * Hold-button diameter in pixels, one entry per stage. Stage 5 is tiny on purpose.
+     * Hold-button diameter in pixels. The same size on every stage.
+     * This is the old first-stage size; a new diameter was not given.
      */
-    public static final List<Double> ROUND2_BUTTON_SIZES = List.of(240.0, 180.0, 120.0, 72.0, 36.0);
+    public static final double ROUND2_BUTTON_SIZE = 240;
 
-    /** TEMPORARY TEST VALUE, OWNER TO CONFIRM. Marker travel speed, pixels per second. Same every stage. */
-    public static final double ROUND2_MARKER_SPEED = 240;
+    /**
+     * TEMPORARY TEST VALUE, OWNER TO TUNE.
+     * Red-zone height as a percent of the bar length, one value per stage.
+     * Stage 1 is the biggest. Stage 5 is a thin sliver.
+     */
+    public static final List<Double> ROUND2_RED_ZONE_PERCENTS = List.of(8.0, 5.0, 3.0, 1.5, 0.5);
 
-    /** TEMPORARY TEST VALUE, OWNER TO CONFIRM. */
+    /**
+     * TEMPORARY TEST VALUE, OWNER TO TUNE.
+     * Marker speed in bar lengths per second, one value per stage.
+     * Stage 5 is the fastest.
+     */
+    public static final List<Double> ROUND2_MARKER_SPEEDS = List.of(3.0, 5.0, 7.0, 10.0, 14.0);
+
+    /** TEMPORARY TEST VALUE, OWNER TO TUNE. Bar length in pixels. Percents and speeds use this. */
     public static final double ROUND2_TRACK_HEIGHT = 420;
     public static final double ROUND2_TRACK_WIDTH = 72;
     public static final double ROUND2_MARKER_SIZE = 28;
-
-    /** TEMPORARY TEST VALUE, OWNER TO CONFIRM. Used while ROUND2_TARGET_SHRINKS is false. */
-    public static final double ROUND2_RED_ZONE_HEIGHT = 84;
-
-    /**
-     * TEMPORARY TEST VALUE, OWNER TO CONFIRM.
-     * Red-spot height per stage, used only when ROUND2_TARGET_SHRINKS is true.
-     */
-    public static final List<Double> ROUND2_RED_ZONE_HEIGHTS = List.of(120.0, 84.0, 56.0, 34.0, 16.0);
 
     /**
      * TEMPORARY TEST VALUE, OWNER TO CONFIRM.
@@ -238,16 +243,29 @@ public final class Config {
         return hits + " " + word + " out of " + ROUND2_TOTAL_STAGES;
     }
 
-    public static double round2ButtonSize(int stage) {
-        return stageValue(ROUND2_BUTTON_SIZES, stage);
+    /** Red-zone height in pixels. Percents come from Config, so the drawn band matches the hit. */
+    public static double round2RedZoneHeight(int stage) {
+        int sizeStage = ROUND2_TARGET_SHRINKS ? stage : 1;
+        return ROUND2_TRACK_HEIGHT * stageValue(ROUND2_RED_ZONE_PERCENTS, sizeStage) / 100.0;
     }
 
-    /** Red-spot height for this stage. The shrink switch picks which list is used. */
-    public static double round2RedZoneHeight(int stage) {
-        if (!ROUND2_TARGET_SHRINKS) {
-            return ROUND2_RED_ZONE_HEIGHT;
+    /** Marker speed in pixels per second for this stage. */
+    public static double round2MarkerSpeed(int stage) {
+        return stageValue(ROUND2_MARKER_SPEEDS, stage) * ROUND2_TRACK_HEIGHT;
+    }
+
+    /** "Speed 14, Target 0.5%" using this stage's Config values. */
+    public static String round2PaceLabel(int stage) {
+        double speed = stageValue(ROUND2_MARKER_SPEEDS, stage);
+        double percent = stageValue(ROUND2_RED_ZONE_PERCENTS, ROUND2_TARGET_SHRINKS ? stage : 1);
+        return "Speed " + plainNumber(speed) + ", Target " + plainNumber(percent) + "%";
+    }
+
+    private static String plainNumber(double value) {
+        if (value == Math.rint(value)) {
+            return String.valueOf((int) value);
         }
-        return stageValue(ROUND2_RED_ZONE_HEIGHTS, stage);
+        return String.valueOf(value);
     }
 
     /** Top of the red spot, in pixels down the bar. */
@@ -264,12 +282,14 @@ public final class Config {
         return top;
     }
 
-    /** True when the stopped marker overlaps the red spot. */
-    public static boolean round2StoppedOnRed(double markerTop, int stage) {
+    /**
+     * True when the moving bar's centre is inside the red band.
+     * The band on screen is this same range.
+     */
+    public static boolean round2StoppedOnRed(double centerY, int stage) {
         double redTop = round2RedZoneTop(stage);
         double redBottom = redTop + round2RedZoneHeight(stage);
-        double markerBottom = markerTop + ROUND2_MARKER_SIZE;
-        return markerBottom > redTop && markerTop < redBottom;
+        return centerY >= redTop && centerY <= redBottom;
     }
 
     private static double stageValue(List<Double> values, int stage) {

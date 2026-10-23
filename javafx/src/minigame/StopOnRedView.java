@@ -4,6 +4,7 @@ import javafx.animation.Animation;
 import javafx.animation.AnimationTimer;
 import javafx.animation.Interpolator;
 import javafx.animation.TranslateTransition;
+import javafx.beans.value.ChangeListener;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
@@ -18,9 +19,9 @@ import javafx.scene.layout.Pane;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
-import javafx.scene.shape.Circle;
 import javafx.scene.shape.Rectangle;
 import javafx.scene.shape.SVGPath;
+import javafx.stage.Window;
 import javafx.util.Duration;
 
 /**
@@ -42,15 +43,17 @@ public class StopOnRedView extends VBox {
     private final VBox play = new VBox(12);
     private final VBox result = new VBox(12);
     private final Label stageLabel = new Label();
+    private final Label paceLabel = new Label();
     private final Label hitsLabel = new Label();
     private final Label feedbackWord = new Label();
     private final SVGPath feedbackIcon = new SVGPath();
     private final HBox feedback = new HBox(8);
+    private final Button back = new Button("Back");
     private final Button hold = new Button("Hold");
     private final Pane track = new Pane();
     private final Rectangle bar = new Rectangle();
     private final Rectangle redSpot = new Rectangle();
-    private final Circle marker = new Circle();
+    private final Rectangle marker = new Rectangle();
     private final Label redWord = new Label("Red");
     private final Label resultMessage = new Label();
     private final Label resultHits = new Label();
@@ -61,8 +64,9 @@ public class StopOnRedView extends VBox {
     private Mode mode = Mode.START;
     private int stageNumber = 1;
     private int hits;
-    private double markerTop;
-    private int markerDirection = 1;
+    private double markerCenter;
+    private long holdStartedNanos;
+    private boolean clockOn;
     private boolean spaceDown;
     private boolean pointerDown;
     private boolean heldThisStage;
@@ -76,6 +80,20 @@ public class StopOnRedView extends VBox {
     private final javafx.event.EventHandler<KeyEvent> keyReleased = this::onKeyReleased;
     private final javafx.event.EventHandler<MouseEvent> mouseReleased = this::onMouseReleased;
     private final javafx.event.EventHandler<TouchEvent> touchReleased = this::onTouchReleased;
+    private final ChangeListener<Boolean> focusListener = (obs, wasFocused, focused) -> {
+        if (!focused) {
+            // Letting go of the window is not a stop. Do not score the attempt.
+            cancelHold();
+        }
+    };
+    private final ChangeListener<Window> windowListener = (obs, oldWindow, newWindow) -> {
+        if (oldWindow != null) {
+            oldWindow.focusedProperty().removeListener(focusListener);
+        }
+        if (newWindow != null) {
+            newWindow.focusedProperty().addListener(focusListener);
+        }
+    };
 
     public StopOnRedView(Scene scene, Progress progress, Runnable backToMenu) {
         this.scene = scene;
@@ -84,6 +102,7 @@ public class StopOnRedView extends VBox {
 
         setSpacing(12);
         setPadding(new Insets(18));
+        setFocusTraversable(true);
         setStyle("-fx-background-color: white; -fx-background-radius: 28;");
 
         buildChrome();
@@ -96,10 +115,14 @@ public class StopOnRedView extends VBox {
         scene.addEventFilter(KeyEvent.KEY_RELEASED, keyReleased);
         scene.addEventFilter(MouseEvent.MOUSE_RELEASED, mouseReleased);
         scene.addEventFilter(TouchEvent.TOUCH_RELEASED, touchReleased);
+        scene.windowProperty().addListener(windowListener);
+        if (scene.getWindow() != null) {
+            scene.getWindow().focusedProperty().addListener(focusListener);
+        }
     }
 
     private void buildChrome() {
-        Button back = new Button("Back");
+        back.setFocusTraversable(false);
         back.setStyle(MenuView.buttonStyle("#ffffff"));
         back.setOnAction(event -> leave());
 
@@ -119,10 +142,11 @@ public class StopOnRedView extends VBox {
 
     private void buildIntro() {
         intro.setAlignment(Pos.CENTER_LEFT);
-        Label help = new Label("Hold the button. A marker moves up and down the bar. Let go when it is on the red spot.");
-        Label rules = new Label("There are " + Config.ROUND2_TOTAL_STAGES + " stages. The hold button gets smaller each stage.");
+        Label help = new Label("Hold SPACE, release to stop on red.");
+        Label rules = new Label("There are " + Config.ROUND2_TOTAL_STAGES
+                + " stages. The hold button stays the same size.");
         String spot = Config.ROUND2_TARGET_SHRINKS
-                ? "The red spot gets smaller each stage."
+                ? "The red spot gets shorter each stage. The last stage is the fastest."
                 : "The red spot stays the same size each stage.";
         Label shrink = new Label(spot);
         Label goals = new Label(Config.ROUND2_HITS_TO_CLEAR + " hits clear the round. "
@@ -132,6 +156,7 @@ public class StopOnRedView extends VBox {
             label.setStyle("-fx-font-size: 20px; -fx-text-fill: #1e2430;");
         }
         Button start = new Button("Start");
+        start.setFocusTraversable(false);
         start.setStyle(MenuView.buttonStyle("#ffd84d") + "-fx-font-size: 28px; -fx-padding: 16 36;");
         start.setOnAction(event -> beginPlay());
         intro.getChildren().addAll(help, rules, shrink, goals, start);
@@ -140,6 +165,7 @@ public class StopOnRedView extends VBox {
     private void buildPlay() {
         play.setAlignment(Pos.CENTER_LEFT);
         stageLabel.setStyle(readoutStyle());
+        paceLabel.setStyle(readoutStyle());
         hitsLabel.setStyle(readoutStyle());
 
         bar.setWidth(Config.ROUND2_TRACK_WIDTH);
@@ -148,14 +174,16 @@ public class StopOnRedView extends VBox {
         bar.setArcHeight(28);
         bar.setFill(Color.web("#e7f6ff"));
 
-        redSpot.setArcWidth(16);
-        redSpot.setArcHeight(16);
+        redSpot.setArcWidth(0);
+        redSpot.setArcHeight(0);
         redSpot.setFill(Color.web("#ff5a5a"));
 
-        marker.setRadius(Config.ROUND2_MARKER_SIZE / 2);
-        marker.setFill(Color.web("#1e2430"));
-        marker.setStroke(Color.WHITE);
-        marker.setStrokeWidth(3);
+        // A rounded bar, not a ball. The outline keeps it visible on the red band.
+        marker.setArcWidth(Config.ROUND2_MARKER_SIZE);
+        marker.setArcHeight(Config.ROUND2_MARKER_SIZE);
+        marker.setFill(Color.web("#fffdf6"));
+        marker.setStroke(Color.web("#1e2430"));
+        marker.setStrokeWidth(4);
 
         redWord.setStyle("-fx-font-size: 18px; -fx-font-weight: bold; -fx-text-fill: #1e2430;");
         track.setPrefSize(Config.ROUND2_TRACK_WIDTH + 72, Config.ROUND2_TRACK_HEIGHT);
@@ -171,15 +199,17 @@ public class StopOnRedView extends VBox {
         feedback.setManaged(false);
 
         hold.setFocusTraversable(false);
+        hold.setDefaultButton(false);
+        styleHoldButton();
         hold.setOnMousePressed(this::onHoldPressed);
         hold.setOnTouchPressed(this::onHoldTouched);
-        Label hint = new Label("Hold, then let go on the red spot. Space does the same.");
+        Label hint = new Label("Hold SPACE, release to stop on red.");
         hint.setWrapText(true);
         hint.setStyle("-fx-font-size: 18px; -fx-text-fill: #1e2430;");
 
         VBox side = new VBox(14, feedback, hold, hint);
         side.setAlignment(Pos.CENTER_LEFT);
-        play.getChildren().addAll(stageLabel, hitsLabel, new HBox(28, track, side));
+        play.getChildren().addAll(stageLabel, paceLabel, hitsLabel, new HBox(28, track, side));
     }
 
     private void buildResult() {
@@ -188,9 +218,11 @@ public class StopOnRedView extends VBox {
         resultMessage.setStyle("-fx-font-size: 32px; -fx-font-weight: bold; -fx-text-fill: #1e2430;");
         resultHits.setStyle(readoutStyle());
         Button replay = new Button("Replay");
+        replay.setFocusTraversable(false);
         replay.setStyle(MenuView.buttonStyle("#ffd84d"));
         replay.setOnAction(event -> beginPlay());
         Button menu = new Button("Back to menu");
+        menu.setFocusTraversable(false);
         menu.setStyle(MenuView.buttonStyle("#ffffff"));
         menu.setOnAction(event -> leave());
         result.getChildren().addAll(resultMessage, resultHits, new HBox(12, replay, menu));
@@ -205,6 +237,8 @@ public class StopOnRedView extends VBox {
         showOnly(play);
         beginStage();
         startLoop();
+        // Keep Space from landing on a button. Mouse can still press Back and Hold.
+        requestFocus();
     }
 
     /** A fresh stage. The marker waits at the top until the player holds. */
@@ -213,8 +247,8 @@ public class StopOnRedView extends VBox {
         spaceDown = false;
         pointerDown = false;
         heldThisStage = false;
-        markerTop = 0;
-        markerDirection = 1;
+        clockOn = false;
+        markerCenter = Config.ROUND2_MARKER_SIZE / 2.0;
         feedback.setVisible(false);
         feedback.setManaged(false);
         paintStage();
@@ -223,9 +257,13 @@ public class StopOnRedView extends VBox {
 
     private void paintStage() {
         stageLabel.setText("Stage " + stageNumber + " of " + Config.ROUND2_TOTAL_STAGES);
+        paceLabel.setText(Config.round2PaceLabel(stageNumber));
         hitsLabel.setText("Hits: " + hits);
-        double size = Config.round2ButtonSize(stageNumber);
-        int font = (int) Math.max(11, Math.min(26, size / 6.0));
+    }
+
+    /** One size for every stage. The number lives in Config. */
+    private void styleHoldButton() {
+        double size = Config.ROUND2_BUTTON_SIZE;
         hold.setText("Hold");
         hold.setMinSize(size, size);
         hold.setPrefSize(size, size);
@@ -233,7 +271,7 @@ public class StopOnRedView extends VBox {
         hold.setStyle("-fx-background-color: #ffd84d;"
                 + "-fx-text-fill: #1e2430;"
                 + "-fx-font-weight: bold;"
-                + "-fx-font-size: " + font + "px;"
+                + "-fx-font-size: 22px;"
                 + "-fx-background-radius: 999;"
                 + "-fx-padding: 0;"
                 + "-fx-cursor: hand;");
@@ -242,15 +280,47 @@ public class StopOnRedView extends VBox {
     private void placePieces() {
         double redTop = Config.round2RedZoneTop(stageNumber);
         double redHeight = Config.round2RedZoneHeight(stageNumber);
-        redSpot.setX(6);
-        redSpot.setWidth(Config.ROUND2_TRACK_WIDTH - 12);
+        redSpot.setX(0);
+        redSpot.setWidth(Config.ROUND2_TRACK_WIDTH);
         redSpot.setY(redTop);
         redSpot.setHeight(redHeight);
         redWord.setLayoutX(Config.ROUND2_TRACK_WIDTH + 10);
         redWord.setLayoutY(redTop + redHeight / 2 - 12);
 
-        marker.setCenterX(Config.ROUND2_TRACK_WIDTH / 2);
-        marker.setCenterY(markerTop + Config.ROUND2_MARKER_SIZE / 2);
+        double thickness = Config.ROUND2_MARKER_SIZE;
+        double width = Config.ROUND2_TRACK_WIDTH + thickness;
+        marker.setWidth(width);
+        marker.setHeight(thickness);
+        marker.setX((Config.ROUND2_TRACK_WIDTH - width) / 2.0);
+        marker.setY(markerCenter - thickness / 2.0);
+    }
+
+    /** Centre of the bar after this many seconds of holding. Same on every computer. */
+    private double centerAt(long nowNanos) {
+        double elapsed = (nowNanos - holdStartedNanos) / NANOS_PER_SECOND;
+        if (elapsed < 0) {
+            elapsed = 0;
+        }
+        double speed = Config.round2MarkerSpeed(stageNumber);
+        double span = Config.ROUND2_TRACK_HEIGHT - Config.ROUND2_MARKER_SIZE;
+        if (span < 1) {
+            span = 1;
+        }
+        double cycle = span * 2;
+        double along = (elapsed * speed) % cycle;
+        if (along > span) {
+            along = cycle - along;
+        }
+        return Config.ROUND2_MARKER_SIZE / 2.0 + along;
+    }
+
+    /** Remember when this hold began. A second button does not restart the clock. */
+    private void armHold() {
+        if (!spaceDown && !pointerDown) {
+            holdStartedNanos = System.nanoTime();
+            clockOn = true;
+        }
+        heldThisStage = true;
     }
 
     private void startLoop() {
@@ -271,9 +341,6 @@ public class StopOnRedView extends VBox {
                 }
                 double dt = (now - lastTime) / NANOS_PER_SECOND;
                 lastTime = now;
-                if (dt > Config.MAX_FRAME_SECONDS) {
-                    dt = Config.MAX_FRAME_SECONDS;
-                }
                 update(dt);
             }
         };
@@ -288,16 +355,8 @@ public class StopOnRedView extends VBox {
     }
 
     private void update(double dt) {
-        if (mode == Mode.PLAYING && (spaceDown || pointerDown)) {
-            double travel = Config.ROUND2_TRACK_HEIGHT - Config.ROUND2_MARKER_SIZE;
-            markerTop += markerDirection * Config.ROUND2_MARKER_SPEED * dt;
-            if (markerTop <= 0) {
-                markerTop = 0;
-                markerDirection = 1;
-            } else if (markerTop >= travel) {
-                markerTop = travel;
-                markerDirection = -1;
-            }
+        if (mode == Mode.PLAYING && clockOn && (spaceDown || pointerDown)) {
+            markerCenter = centerAt(System.nanoTime());
             placePieces();
             return;
         }
@@ -323,8 +382,8 @@ public class StopOnRedView extends VBox {
         if (mode != Mode.PLAYING || pointerDown) {
             return;
         }
+        armHold();
         pointerDown = true;
-        heldThisStage = true;
     }
 
     private void onMouseReleased(MouseEvent event) {
@@ -345,25 +404,41 @@ public class StopOnRedView extends VBox {
     }
 
     private void onKeyPressed(KeyEvent event) {
-        if (event.getCode() != KeyCode.SPACE || mode != Mode.PLAYING) {
+        if (event.getCode() != KeyCode.SPACE) {
             return;
         }
+        // Swallow Space so it cannot click a focused button or scroll the scene.
         event.consume();
-        // Key repeat would fire this again while Space is still down.
-        if (spaceDown) {
+        if (mode != Mode.PLAYING || spaceDown) {
             return;
         }
+        armHold();
         spaceDown = true;
-        heldThisStage = true;
     }
 
     private void onKeyReleased(KeyEvent event) {
-        if (event.getCode() != KeyCode.SPACE || !spaceDown) {
+        if (event.getCode() != KeyCode.SPACE) {
             return;
         }
         event.consume();
+        if (!spaceDown) {
+            return;
+        }
+        Window window = scene.getWindow();
+        if (window != null && !window.isFocused()) {
+            cancelHold();
+            return;
+        }
         spaceDown = false;
         releaseHold();
+    }
+
+    /** Drop a held Space or pointer without counting a hit or a miss. */
+    private void cancelHold() {
+        spaceDown = false;
+        pointerDown = false;
+        heldThisStage = false;
+        clockOn = false;
     }
 
     /** Stop the marker when every hold (mouse, touch, or Space) has been let go. */
@@ -372,7 +447,12 @@ public class StopOnRedView extends VBox {
             return;
         }
         heldThisStage = false;
-        boolean hit = Config.round2StoppedOnRed(markerTop, stageNumber);
+        if (clockOn) {
+            markerCenter = centerAt(System.nanoTime());
+            clockOn = false;
+            placePieces();
+        }
+        boolean hit = Config.round2StoppedOnRed(markerCenter, stageNumber);
         if (hit) {
             hits += 1;
         }
@@ -418,6 +498,7 @@ public class StopOnRedView extends VBox {
             return;
         }
         mode = Mode.LEFT;
+        cancelHold();
         stopLoop();
         if (titleBob != null) {
             titleBob.stop();
@@ -426,6 +507,10 @@ public class StopOnRedView extends VBox {
         scene.removeEventFilter(KeyEvent.KEY_RELEASED, keyReleased);
         scene.removeEventFilter(MouseEvent.MOUSE_RELEASED, mouseReleased);
         scene.removeEventFilter(TouchEvent.TOUCH_RELEASED, touchReleased);
+        scene.windowProperty().removeListener(windowListener);
+        if (scene.getWindow() != null) {
+            scene.getWindow().focusedProperty().removeListener(focusListener);
+        }
         backToMenu.run();
     }
 

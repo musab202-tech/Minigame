@@ -3,7 +3,11 @@ package minigame;
 import java.util.ArrayList;
 import java.util.List;
 
+import javafx.animation.Animation;
 import javafx.animation.AnimationTimer;
+import javafx.animation.Interpolator;
+import javafx.animation.TranslateTransition;
+import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
@@ -29,6 +33,7 @@ import javafx.scene.paint.Stop;
 import javafx.scene.shape.Circle;
 import javafx.scene.shape.Rectangle;
 import javafx.scene.shape.SVGPath;
+import javafx.util.Duration;
 
 /**
  * Falling Balls, ported from js/rounds/round1.js.
@@ -60,6 +65,10 @@ public class FallingBallsView extends VBox {
     private final Label speedLabel = new Label();
     private final HBox lives = new HBox(6);
     private final Label pausedLabel = new Label("Paused");
+    private final Label readyTitle = new Label("Get ready!");
+    private final Label readyCount = new Label();
+    private final VBox readyBox = new VBox(8, readyTitle, readyCount);
+    private TranslateTransition titleBob;
     private final Label resultMessage = new Label();
     private final Label resultScore = new Label();
     private final Label resultChances = new Label();
@@ -68,14 +77,22 @@ public class FallingBallsView extends VBox {
     private final List<Ball> balls = new ArrayList<>();
     private final List<SVGPath> lifeIcons = new ArrayList<>();
 
-    private enum Mode { START, PLAYING, PAUSED, RESULT, LEFT }
+    /** READY shows Start. Balls exist only in PLAYING. */
+    private enum State { READY, COUNTDOWN, PLAYING, PAUSED, FINISHED }
 
-    private Mode mode = Mode.START;
+    private State state = State.READY;
     private int score;
     private int chances;
     private int spawned;
     private int settled;
     private double spawnTimer;
+    private double readyRemaining;
+    private State resumeState = State.COUNTDOWN;
+    private boolean left;
+    /** True only after the player presses the Start button. The opening click does not count. */
+    private boolean startArmed;
+    /** Ignore Space or Enter that is still down from opening the round. */
+    private boolean blockOpeningKey = true;
     private double platformX;
     private boolean heldLeft;
     private boolean heldRight;
@@ -99,9 +116,15 @@ public class FallingBallsView extends VBox {
         buildHud();
         buildField();
         buildResult();
-        showOnly(intro);
+        showReady();
         scene.addEventFilter(KeyEvent.KEY_PRESSED, keyPressed);
         scene.addEventFilter(KeyEvent.KEY_RELEASED, keyReleased);
+        Platform.runLater(() -> {
+            if (!blockOpeningKey) {
+                return;
+            }
+            blockOpeningKey = false;
+        });
     }
 
     private final javafx.event.EventHandler<KeyEvent> keyPressed = this::onKeyPressed;
@@ -119,6 +142,16 @@ public class FallingBallsView extends VBox {
 
         Label title = new Label("Falling Balls");
         title.setStyle("-fx-font-size: 36px; -fx-font-weight: bold; -fx-text-fill: #1e2430;");
+        // Decorative only. The countdown itself always takes the Config wait.
+        if (!Motion.reduce()) {
+            titleBob = new TranslateTransition(Duration.millis(1400), title);
+            titleBob.setFromY(0);
+            titleBob.setToY(6);
+            titleBob.setAutoReverse(true);
+            titleBob.setCycleCount(Animation.INDEFINITE);
+            titleBob.setInterpolator(Interpolator.EASE_BOTH);
+            titleBob.play();
+        }
 
         HBox toolbar = new HBox(12, back, pauseButton);
         getChildren().addAll(toolbar, title, hudPanel, stage);
@@ -126,7 +159,7 @@ public class FallingBallsView extends VBox {
 
     private void buildIntro() {
         intro.setAlignment(Pos.CENTER_LEFT);
-        Label help = new Label("Catch the falling balls with the platform. Use the arrow keys, A and D, or drag.");
+        Label help = new Label("Move the platform with the arrow keys, A/D or the mouse to catch the balls.");
         Label rules = new Label("There are " + Config.TOTAL_BALLS + " balls. You start with "
                 + Config.STARTING_CHANCES + " chances. Each miss costs one chance."
                 + " The last miss ends the run.");
@@ -142,8 +175,17 @@ public class FallingBallsView extends VBox {
             label.setStyle("-fx-font-size: 20px; -fx-text-fill: #1e2430;");
         }
         Button start = new Button("Start");
-        start.setStyle(MenuView.buttonStyle("#ff8d6b"));
-        start.setOnAction(event -> beginPlay());
+        start.setStyle(MenuView.buttonStyle("#ff8d6b") + "-fx-font-size: 28px; -fx-padding: 16 40;");
+        start.addEventFilter(MouseEvent.MOUSE_PRESSED, event -> startArmed = true);
+        start.addEventFilter(TouchEvent.TOUCH_PRESSED, event -> startArmed = true);
+        start.setOnAction(event -> {
+            // A click that merely opened this screen has no press on this button.
+            if (!startArmed || state != State.READY) {
+                return;
+            }
+            startArmed = false;
+            beginCountdown();
+        });
         intro.getChildren().addAll(help, rules, goals, speedNote, start);
     }
 
@@ -189,7 +231,15 @@ public class FallingBallsView extends VBox {
                 + "-fx-background-radius: 999; -fx-padding: 8 18;");
         pausedLabel.setVisible(false);
         StackPane.setAlignment(pausedLabel, Pos.CENTER);
-        field.getChildren().add(platform);
+        readyTitle.setStyle("-fx-font-size: 32px; -fx-font-weight: bold; -fx-text-fill: #1e2430;");
+        readyCount.setStyle("-fx-font-size: 64px; -fx-font-weight: bold; -fx-text-fill: #1e2430;");
+        readyBox.setAlignment(Pos.CENTER);
+        readyBox.setStyle("-fx-background-color: white; -fx-background-radius: 24; -fx-padding: 12 28;");
+        readyBox.setVisible(false);
+        readyBox.layoutXProperty().bind(
+                field.widthProperty().subtract(readyBox.widthProperty()).divide(2));
+        readyBox.layoutYProperty().bind(field.heightProperty().multiply(0.18));
+        field.getChildren().addAll(platform, readyBox);
         field.setOnMousePressed(this::onMousePressed);
         field.setOnMouseDragged(this::onMouseDragged);
         field.setOnMouseReleased(event -> dragging = false);
@@ -210,53 +260,74 @@ public class FallingBallsView extends VBox {
         resultChances.setStyle(readoutStyle());
         Button replay = new Button("Replay");
         replay.setStyle(MenuView.buttonStyle("#ff8d6b"));
-        replay.setOnAction(event -> beginPlay());
+        replay.setOnAction(event -> showReady());
         Button menu = new Button("Back to menu");
         menu.setStyle(MenuView.buttonStyle("#ffffff"));
         menu.setOnAction(event -> leave());
         result.getChildren().addAll(resultMessage, resultScore, resultChances, new HBox(12, replay, menu));
     }
 
-    private void beginPlay() {
-        mode = Mode.START;
+    /** Back to the Start screen. No loop, no balls. */
+    private void showReady() {
+        stopLoop();
+        clearBalls();
+        heldLeft = false;
+        heldRight = false;
+        dragging = false;
+        score = 0;
+        chances = Config.STARTING_CHANCES;
+        spawned = 0;
+        settled = 0;
+        spawnTimer = 0;
+        readyRemaining = Config.FIRST_BALL_DELAY_SECONDS;
+        readyBox.setVisible(false);
+        hideHud();
+        pauseButton.setVisible(false);
+        pauseButton.setManaged(false);
+        pausedLabel.setVisible(false);
+        state = State.READY;
+        showOnly(intro);
+        if (titleBob != null) {
+            titleBob.play();
+        }
+    }
+
+    private void beginCountdown() {
+        if (left || state != State.READY) {
+            return;
+        }
+        if (titleBob != null) {
+            titleBob.stop();
+        }
         pauseButton.setText("Pause");
         pauseButton.setVisible(true);
         pauseButton.setManaged(true);
         pausedLabel.setVisible(false);
         showHud();
         showOnly(field);
-        score = 0;
-        chances = Config.STARTING_CHANCES;
-        spawned = 0;
-        buildLifeIcons();
+        resetRun();
         paintHud();
-        // Wait until the field has a real width, then drop the first ball.
+        // Platform can move now. The first ball waits.
+        readyRemaining = Config.FIRST_BALL_DELAY_SECONDS;
+        readyBox.setVisible(true);
+        readyBox.toFront();
+        paintReady();
+        state = State.COUNTDOWN;
         if (field.getWidth() > 1) {
-            startRun();
+            startLoop();
         } else {
             ChangeListener<Number> waitForWidth = new ChangeListener<>() {
                 @Override
                 public void changed(javafx.beans.value.ObservableValue<? extends Number> observable,
                         Number oldWidth, Number newWidth) {
-                    if (newWidth.doubleValue() > 1) {
+                    if (newWidth.doubleValue() > 1 && state == State.COUNTDOWN) {
                         field.widthProperty().removeListener(this);
-                        startRun();
+                        startLoop();
                     }
                 }
             };
             field.widthProperty().addListener(waitForWidth);
         }
-    }
-
-    private void startRun() {
-        if (mode == Mode.LEFT) {
-            return;
-        }
-        resetRun();
-        spawnBall();
-        paintHud();
-        mode = Mode.PLAYING;
-        startLoop();
     }
 
     private void resetRun() {
@@ -273,16 +344,17 @@ public class FallingBallsView extends VBox {
     }
 
     private void togglePause() {
-        if (mode == Mode.PLAYING) {
-            mode = Mode.PAUSED;
+        if (state == State.COUNTDOWN || state == State.PLAYING) {
+            resumeState = state;
+            state = State.PAUSED;
             stopLoop();
             pauseButton.setText("Resume");
             pausedLabel.setVisible(true);
             pausedLabel.toFront();
             return;
         }
-        if (mode == Mode.PAUSED) {
-            mode = Mode.PLAYING;
+        if (state == State.PAUSED) {
+            state = resumeState;
             pauseButton.setText("Pause");
             pausedLabel.setVisible(false);
             startLoop();
@@ -305,15 +377,16 @@ public class FallingBallsView extends VBox {
                     lastTime = now;
                     return;
                 }
-                double dt = (now - lastTime) / NANOS_PER_SECOND;
+                double realDt = (now - lastTime) / NANOS_PER_SECOND;
                 lastTime = now;
-                if (dt > Config.MAX_FRAME_SECONDS) {
-                    dt = Config.MAX_FRAME_SECONDS;
-                }
-                if (mode != Mode.PLAYING) {
+                if (state != State.PLAYING && state != State.COUNTDOWN) {
                     return;
                 }
-                update(dt);
+                double moveDt = realDt;
+                if (moveDt > Config.MAX_FRAME_SECONDS) {
+                    moveDt = Config.MAX_FRAME_SECONDS;
+                }
+                update(moveDt, realDt);
             }
         };
         timer.start();
@@ -326,18 +399,26 @@ public class FallingBallsView extends VBox {
         }
     }
 
-    private void update(double dt) {
+    private void update(double moveDt, double realDt) {
         double fieldWidth = field.getWidth();
         double fieldHeight = field.getHeight();
         if (fieldWidth < 1 || fieldHeight < 1) {
             return;
         }
-        movePlatform(dt, fieldWidth);
-        stepBalls(dt, fieldWidth, fieldHeight);
-        if (mode != Mode.PLAYING) {
+        movePlatform(moveDt, fieldWidth);
+        if (state == State.COUNTDOWN) {
+            readyRemaining -= realDt;
+            paintReady();
+            if (readyRemaining <= 0) {
+                beginFalling();
+            }
             return;
         }
-        spawnTimer += dt;
+        stepBalls(moveDt, fieldWidth, fieldHeight);
+        if (state != State.PLAYING) {
+            return;
+        }
+        spawnTimer += moveDt;
         if (spawned < Config.TOTAL_BALLS && spawnTimer >= Config.BALL_SPAWN_INTERVAL) {
             spawnTimer -= Config.BALL_SPAWN_INTERVAL;
             spawnBall();
@@ -373,7 +454,7 @@ public class FallingBallsView extends VBox {
         List<Ball> snapshot = new ArrayList<>(balls);
 
         for (Ball ball : snapshot) {
-            if (mode != Mode.PLAYING) {
+            if (state != State.PLAYING) {
                 break;
             }
             double previousY = ball.y;
@@ -406,10 +487,27 @@ public class FallingBallsView extends VBox {
             }
         }
 
-        if (mode == Mode.PLAYING) {
+        if (state == State.PLAYING) {
             balls.clear();
             balls.addAll(kept);
         }
+    }
+
+    /** The countdown is over. Drop the first ball, then use the normal spawn interval. */
+    private void beginFalling() {
+        readyBox.setVisible(false);
+        spawnBall();
+        paintHud();
+        state = State.PLAYING;
+    }
+
+    private void paintReady() {
+        double left = Math.max(readyRemaining, 0);
+        int number = (int) Math.ceil(left);
+        if (number < 1) {
+            number = 1;
+        }
+        readyCount.setText(String.valueOf(number));
     }
 
     private void spawnBall() {
@@ -427,10 +525,10 @@ public class FallingBallsView extends VBox {
     }
 
     private void finish() {
-        if (mode == Mode.RESULT || mode == Mode.LEFT) {
+        if (left || state == State.FINISHED) {
             return;
         }
-        mode = Mode.RESULT;
+        state = State.FINISHED;
         stopLoop();
         clearBalls();
         dragging = false;
@@ -446,6 +544,7 @@ public class FallingBallsView extends VBox {
         pauseButton.setVisible(false);
         pauseButton.setManaged(false);
         hideHud();
+        readyBox.setVisible(false);
         showOnly(result);
         resultMessage.setText(outcome.message());
         resultScore.setText("Caught " + score + " of " + Config.TOTAL_BALLS);
@@ -506,17 +605,37 @@ public class FallingBallsView extends VBox {
     }
 
     private void leave() {
-        if (mode == Mode.LEFT) {
+        if (left) {
             return;
         }
-        mode = Mode.LEFT;
+        left = true;
+        state = State.FINISHED;
         stopLoop();
+        clearBalls();
+        if (titleBob != null) {
+            titleBob.stop();
+        }
         scene.removeEventFilter(KeyEvent.KEY_PRESSED, keyPressed);
         scene.removeEventFilter(KeyEvent.KEY_RELEASED, keyReleased);
         backToMenu.run();
     }
 
+    private boolean canSteer() {
+        return state == State.COUNTDOWN || state == State.PLAYING;
+    }
+
     private void onKeyPressed(KeyEvent event) {
+        if (state == State.READY && (event.getCode() == KeyCode.ENTER || event.getCode() == KeyCode.SPACE)) {
+            event.consume();
+            if (blockOpeningKey) {
+                return;
+            }
+            beginCountdown();
+            return;
+        }
+        if (!canSteer()) {
+            return;
+        }
         if (event.getCode() == KeyCode.LEFT || event.getCode() == KeyCode.A) {
             heldLeft = true;
             event.consume();
@@ -530,6 +649,11 @@ public class FallingBallsView extends VBox {
     }
 
     private void onKeyReleased(KeyEvent event) {
+        if (blockOpeningKey && (event.getCode() == KeyCode.ENTER || event.getCode() == KeyCode.SPACE)) {
+            blockOpeningKey = false;
+            event.consume();
+            return;
+        }
         if (event.getCode() == KeyCode.LEFT || event.getCode() == KeyCode.A) {
             heldLeft = false;
         } else if (event.getCode() == KeyCode.RIGHT || event.getCode() == KeyCode.D) {
@@ -538,7 +662,7 @@ public class FallingBallsView extends VBox {
     }
 
     private void onMousePressed(MouseEvent event) {
-        if (event.isSynthesized() || mode != Mode.PLAYING) {
+        if (event.isSynthesized() || !canSteer()) {
             return;
         }
         dragging = true;
@@ -546,14 +670,14 @@ public class FallingBallsView extends VBox {
     }
 
     private void onMouseDragged(MouseEvent event) {
-        if (event.isSynthesized() || !dragging || mode != Mode.PLAYING) {
+        if (event.isSynthesized() || !dragging || !canSteer()) {
             return;
         }
         movePlatformTo(event.getX());
     }
 
     private void onTouchPressed(TouchEvent event) {
-        if (mode != Mode.PLAYING) {
+        if (!canSteer()) {
             return;
         }
         dragging = true;
@@ -562,7 +686,7 @@ public class FallingBallsView extends VBox {
     }
 
     private void onTouchMoved(TouchEvent event) {
-        if (!dragging || mode != Mode.PLAYING) {
+        if (!dragging || !canSteer()) {
             return;
         }
         movePlatformTo(event.getTouchPoint().getX());
